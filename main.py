@@ -855,15 +855,19 @@ def main() -> None:
     )
 
     scheduler = AsyncIOScheduler(timezone=config.tz)
+
     scheduler.add_job(
         scheduler_loop,
-        "interval",
-        seconds=60,
+        trigger="interval",
+        minutes=5,
         args=[application],
-        max_instances=1,
         coalesce=True,
-    )
-    application.bot_data["scheduler"] = scheduler
+        max_instances=1,
+        misfire_grace_time=120,   # 可选：允许最多延迟2分钟后仍执行一次
+)
+    
+application.bot_data["scheduler"] = scheduler
+
 
     async def post_init(app: Application) -> None:
         await db.init()
