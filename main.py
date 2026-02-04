@@ -824,12 +824,12 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
 
 async def scheduler_loop(application: Application) -> None:
     if SCHEDULER_LOOP_LOCK.locked():
-        return  
-    config: Config = application.bot_data["config"]
-    db: Database = application.bot_data["db"]
-    async with SCHEDULER_LOOP_LOCK:
-        await publish_due_items(application, config, db)
+        return  # 上一轮还没跑完，直接跳过
 
+    async with SCHEDULER_LOOP_LOCK:
+        config: Config = application.bot_data["config"]
+        db: Database = application.bot_data["db"]
+        await publish_due_items(application, config, db)
 
 async def on_shutdown(app: Application) -> None:
     scheduler: AsyncIOScheduler = app.bot_data.get("scheduler")
