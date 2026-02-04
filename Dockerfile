@@ -18,4 +18,7 @@ COPY main.py /app/main.py
 # SQLite persistence location (matches our volume mount in fly.toml)
 ENV DB_PATH=/data/queue.db
 
+# Create the data directory and ensure it is writable
+RUN mkdir -p /data
+
 CMD ["python", "main.py"]
