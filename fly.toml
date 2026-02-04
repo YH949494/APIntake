@@ -7,7 +7,7 @@ primary_region = "sin"
 [env]
   TZ = "Asia/Kuala_Lumpur" 
   # DB_PATH is set in Dockerfile; keep here too if you want explicit override:
-  DB_PATH = "/data/queue.db"
+  DB_PATH = "/tmp/queue.db"
   # Optional tuning (uncomment if you use these envs in code)
   # MAX_POSTS_PER_DAY = "2"
   # MIN_GAP_MINUTES = "180"
@@ -16,12 +16,7 @@ primary_region = "sin"
 [processes]
   app = "python main.py"
 
-# Persistent volume for SQLite (queue/db survives redeploys)
-[mounts]
-  source = "data"
-  destination = "/data"
- 
-# Minimal VM size for a polling bot
+ # Minimal VM size for a polling bot
 [[vm]]
   memory = "256mb"
   cpu_kind = "shared"
