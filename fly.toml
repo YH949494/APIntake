@@ -5,7 +5,7 @@ primary_region = "sin"
   dockerfile = "Dockerfile"
 
 [env]
-  TZ = "Asia/Kuala_Lumpur"
+  TZ = "Asia/Kuala_Lumpur" 
   # DB_PATH is set in Dockerfile; keep here too if you want explicit override:
   DB_PATH = "/data/queue.db"
   # Optional tuning (uncomment if you use these envs in code)
