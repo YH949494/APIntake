@@ -5,7 +5,7 @@ Environment variables:
 - BOT_TOKEN (required)
 - INTAKE_CHAT_ID (required)
 - TARGET_CHANNEL_ID (required)
-- ADMIN_USER_IDS (required, comma-separated)
+- ADMIN_USER_IDS (optional, comma-separated; if empty, fallback to intake group admins)
 - TZ (optional, default "Asia/Kuala_Lumpur")
 - DEFAULT_WINDOWS (optional JSON string of [{"name":"today_night","start":"20:30","end":"23:30"}, ...])
 - MAX_POSTS_PER_DAY (optional int, default 2)
@@ -74,8 +74,8 @@ def load_config() -> Config:
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     intake_chat_id = int(os.getenv("INTAKE_CHAT_ID", "0"))
     target_channel_id = int(os.getenv("TARGET_CHANNEL_ID", "0"))
-    admin_user_ids_raw = os.getenv("ADMIN_USER_IDS", "")
-    admin_user_ids = {int(value.strip()) for value in admin_user_ids_raw.split(",") if value.strip()}
+    admin_user_ids_raw = os.getenv("ADMIN_USER_IDS", "").strip()
+    admin_user_ids = {int(v.strip()) for v in admin_user_ids_raw.split(",") if v.strip()}
     tz_name = os.getenv("TZ", "Asia/Kuala_Lumpur")
     windows_raw = os.getenv("DEFAULT_WINDOWS", "")
     max_posts_per_day = int(os.getenv("MAX_POSTS_PER_DAY", "2"))
@@ -233,8 +233,19 @@ def parse_windows(raw: str) -> list[dict[str, str]]:
     return windows
 
 
-def is_admin(config: Config, user_id: int) -> bool:
-    return user_id in config.admin_user_ids
+async def is_admin(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    config: Config = context.bot_data["config"]
+
+    # If whitelist is provided, use it.
+    if config.admin_user_ids:
+        return user_id in config.admin_user_ids
+
+    # Otherwise fallback: must be admin/creator in the intake group.
+    try:
+        member = await context.bot.get_chat_member(config.intake_chat_id, user_id)
+        return member.status in ("creator", "administrator")
+    except Exception:
+        return False
 
 
 def parse_time(value: str) -> time:
@@ -371,7 +382,7 @@ async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     if update.effective_chat.id != config.intake_chat_id:
         return
-    if not update.effective_user or not is_admin(config, update.effective_user.id):
+    if not update.effective_user or not await is_admin(context, update.effective_user.id):
         return
     await update.message.reply_text(
         "Admins: post or forward media into the intake group. Use the buttons to approve, edit, or reject."
@@ -383,7 +394,7 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.bot_data["db"]
     if update.effective_chat.id != config.intake_chat_id:
         return
-    if not update.effective_user or not is_admin(config, update.effective_user.id):
+    if not update.effective_user or not await is_admin(context, update.effective_user.id):
         return
     since = (now_tz(config.tz) - timedelta(days=7)).isoformat()
     rows = await db.fetchall(
@@ -411,7 +422,7 @@ async def on_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.bot_data["db"]
     if update.effective_chat.id != config.intake_chat_id:
         return
-    if not update.effective_user or not is_admin(config, update.effective_user.id):
+    if not update.effective_user or not await is_admin(context, update.effective_user.id):
         return
     rows = await db.fetchall(
         """
@@ -441,7 +452,7 @@ async def on_intake_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     if update.effective_chat.id != config.intake_chat_id:
         return
-    if not message.from_user or not is_admin(config, message.from_user.id):
+    if not message.from_user or not await is_admin(context, message.from_user.id):
         return
     if message.text:
         state_row = await db.fetchone(
@@ -612,12 +623,20 @@ async def handle_schedule_with_window(
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     db: Database = context.bot_data["db"]
+
     query = update.callback_query
     if not query:
         return
+
     await query.answer()
-    if not query.from_user or not is_admin(config, query.from_user.id):
+
+    # 🔒 HARD GUARDS (ADD THESE HERE)
+    if not query.message or query.message.chat_id != config.intake_chat_id:
         return
+
+    if not query.from_user or not await is_admin(context, query.from_user.id):
+        return
+      
     data = query.data or ""
     if ":" not in data:
         return
@@ -672,7 +691,7 @@ async def on_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if update.effective_chat.id != config.intake_chat_id:
         return
-    if not is_admin(config, message.from_user.id):
+    if not await is_admin(context, message.from_user.id):
         return
 
     state_row = await db.fetchone("SELECT * FROM states WHERE user_id = ?", (message.from_user.id,))
