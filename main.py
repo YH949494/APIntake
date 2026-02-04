@@ -88,8 +88,6 @@ def load_config() -> Config:
         raise RuntimeError("Missing INTAKE_CHAT_ID env var")
     if not target_channel_id:
         raise RuntimeError("Missing TARGET_CHANNEL_ID env var")
-    if not admin_user_ids:
-        raise RuntimeError("Missing ADMIN_USER_IDS env var")
 
     if windows_raw:
         windows = parse_windows(windows_raw)
