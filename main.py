@@ -864,10 +864,9 @@ def main() -> None:
         coalesce=True,
         max_instances=1,
         misfire_grace_time=120,   # 可选：允许最多延迟2分钟后仍执行一次
-)
+    )
     
-application.bot_data["scheduler"] = scheduler
-
+    application.bot_data["scheduler"] = scheduler
 
     async def post_init(app: Application) -> None:
         await db.init()
