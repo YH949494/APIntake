@@ -56,6 +56,7 @@ DEFAULT_WINDOWS = [
     {"name": "tomorrow_morning", "start": "09:00", "end": "11:30"},
 ]
 
+SCHEDULER_LOOP_LOCK = asyncio.Lock()
 
 @dataclass
 class Config:
@@ -822,9 +823,12 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
 
 
 async def scheduler_loop(application: Application) -> None:
+    if SCHEDULER_LOOP_LOCK.locked():
+        return  
     config: Config = application.bot_data["config"]
     db: Database = application.bot_data["db"]
-    await publish_due_items(application, config, db)
+    async with SCHEDULER_LOOP_LOCK:
+        await publish_due_items(application, config, db)
 
 
 async def on_shutdown(app: Application) -> None:
