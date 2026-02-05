@@ -137,6 +137,7 @@ class Database:
                         status TEXT,
                         approval_message_id INTEGER,
                         scheduled_at TEXT,
+                        approved_mode TEXT,                        
                         posted_at TEXT,
                         target_message_id INTEGER,
                         created_at TEXT,
@@ -155,6 +156,11 @@ class Database:
                     """
                 )
                 conn.commit()
+                try:
+                    cur.execute("ALTER TABLE items ADD COLUMN approved_mode TEXT")
+                    conn.commit()
+                except sqlite3.OperationalError:
+                    pass              
             finally:
                 conn.close()
 
@@ -331,6 +337,7 @@ def approval_keyboard(item_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✅ Approve & Schedule", callback_data=f"APPROVE_NEXT:{item_id}")],
+            [InlineKeyboardButton("Publish Now", callback_data=f"approve_now:{item_id}")],          
             [InlineKeyboardButton("🕒 Approve (pick time)", callback_data=f"APPROVE_PICK:{item_id}")],
             [InlineKeyboardButton("✏️ Edit caption", callback_data=f"EDIT_CAPTION:{item_id}")],
             [InlineKeyboardButton("❌ Reject", callback_data=f"REJECT:{item_id}")],
@@ -576,6 +583,25 @@ async def handle_approve_next(context: ContextTypes.DEFAULT_TYPE, item_id: str) 
     )
     LOGGER.info("action=approved_next item_id=%s scheduled_at=%s", item_id, slot.isoformat())
 
+async def handle_approve_now(context: ContextTypes.DEFAULT_TYPE, item_id: str) -> None:
+    config: Config = context.bot_data["config"]
+    db: Database = context.bot_data["db"]
+    now = now_tz(config.tz)
+    scheduled = now - timedelta(seconds=1)
+    await db.execute(
+        """
+        UPDATE items
+        SET status = ?, scheduled_at = ?, approved_mode = ?, updated_at = ?
+        WHERE item_id = ?
+        """,
+        (STATUS_APPROVED, scheduled.isoformat(), "now", now.isoformat(), item_id),
+    )
+    LOGGER.info(
+        "[APPROVE][NOW] action=approved_now item_id=%s scheduled_at=%s",
+        item_id,
+        scheduled.isoformat(),
+    )
+
 
 async def handle_schedule_with_window(
     context: ContextTypes.DEFAULT_TYPE,
@@ -643,6 +669,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action == "APPROVE_NEXT":
         await handle_approve_next(context, item_id)
         await update_approval_card(context.application, item_id)
+    elif action == "approve_now":
+        await handle_approve_now(context, item_id)
+        await publish_due_items(context.application, config, db)
+        await update_approval_card(context.application, item_id)      
     elif action == "APPROVE_PICK":
         await query.edit_message_reply_markup(reply_markup=pick_keyboard(item_id))
     elif action == "EDIT_CAPTION":
@@ -747,7 +777,7 @@ async def on_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update_approval_card(context.application, item_id)
 
 
-async def publish_due_items(app: Application, config: Config, db: Database) -> None:
+async def publish_due_items(app: Application, config: Config, db: Database) -> int:
     now = now_tz(config.tz)
     LOGGER.info(
         "[PUBLISH][START] now=%s tz=%s",
@@ -776,6 +806,7 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
         len(due_rows),
         next_due.isoformat() if next_due else None,
     )
+    sent_count = 0  
     for row in due_rows:
         item_id = row["item_id"]
         claimed = await db.claim_for_post(item_id)
@@ -844,7 +875,8 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
             item_id,
             sent.message_id,
         )
-
+        sent_count += 1
+    return sent_count
 
 async def scheduler_loop(application: Application) -> None:
     LOGGER.info("[SCHED][START] source=apscheduler")  
@@ -871,6 +903,23 @@ async def run_scheduler_once(update: Update, context: ContextTypes.DEFAULT_TYPE)
     LOGGER.info("[SCHED][DONE] source=manual result=%r", result)
     await update.message.reply_text("Scheduler ran once. Check logs for details.")
 
+
+async def on_publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.bot_data["config"]
+    db: Database = context.bot_data["db"]
+    if update.effective_chat.id != config.intake_chat_id:
+        return
+    if not update.effective_user or not await is_admin(context, update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /publish_now <item_id>")
+        return
+    item_id = context.args[0].strip()
+    await handle_approve_now(context, item_id)
+    result = await publish_due_items(context.application, config, db)
+    LOGGER.info("[PUBLISH][DONE] source=publish_now result=%r", result)
+    await update.message.reply_text(f"Publish now requested. Sent={result}.")
+
 async def on_shutdown(app: Application) -> None:
     scheduler: AsyncIOScheduler = app.bot_data.get("scheduler")
     if scheduler:
@@ -889,6 +938,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", on_help))
     application.add_handler(CommandHandler("status", on_status))
     application.add_handler(CommandHandler("queue", on_queue))
+    application.add_handler(CommandHandler("publish_now", on_publish_now))  
     application.add_handler(CommandHandler("run_scheduler_once", run_scheduler_once))  
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_state_text))
