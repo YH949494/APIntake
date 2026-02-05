@@ -749,6 +749,11 @@ async def on_state_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def publish_due_items(app: Application, config: Config, db: Database) -> None:
     now = now_tz(config.tz)
+    LOGGER.info(
+        "[PUBLISH][START] now=%s tz=%s",
+        now.isoformat(),
+        getattr(config.tz, "key", str(config.tz)),
+    )  
     rows = await db.fetchall(
         """
         SELECT * FROM items
@@ -758,15 +763,30 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
         """,
         (STATUS_APPROVED,),
     )
+    due_rows = []
+    next_due = None  
     for row in rows:
         scheduled = datetime.fromisoformat(row["scheduled_at"])
-        if scheduled > now:
-            continue
+        if scheduled <= now:
+            due_rows.append(row)
+        elif next_due is None or scheduled < next_due:
+            next_due = scheduled
+    LOGGER.info(
+        "[PUBLISH][DUE] count=%s next_due=%s",
+        len(due_rows),
+        next_due.isoformat() if next_due else None,
+    )
+    for row in due_rows:
         item_id = row["item_id"]
         claimed = await db.claim_for_post(item_id)
         if not claimed:
             continue
         try:
+            LOGGER.info(
+                "[SEND][TRY] item_id=%s media_type=%s",
+                item_id,
+                row["media_type"],
+            )          
             if row["media_type"] == "photo":
                 sent = await app.bot.send_photo(
                     chat_id=config.target_channel_id,
@@ -796,8 +816,8 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
                     chat_id=config.target_channel_id,
                     text=row["text_content"] or row["caption"] or "",
                 )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("action=publish_failed item_id=%s error=%s", item_id, exc)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("[SEND][FAIL] item_id=%s", item_id)
             await db.execute(
                 "UPDATE items SET target_message_id = NULL, updated_at = ? WHERE item_id = ?",
                 (now_tz(config.tz).isoformat(), item_id),
@@ -819,17 +839,37 @@ async def publish_due_items(app: Application, config: Config, db: Database) -> N
             ),
         )
         await update_approval_card(app, item_id, remove_keyboard=True)
-        LOGGER.info("action=posted item_id=%s target_message_id=%s", item_id, sent.message_id)
+        LOGGER.info(
+            "[SEND][OK] item_id=%s target_message_id=%s",
+            item_id,
+            sent.message_id,
+        )
 
 
 async def scheduler_loop(application: Application) -> None:
+    LOGGER.info("[SCHED][START] source=apscheduler")  
     if SCHEDULER_LOOP_LOCK.locked():
+        LOGGER.info("[SCHED][SKIP] source=apscheduler reason=lock")      
         return  # 上一轮还没跑完，直接跳过
 
     async with SCHEDULER_LOOP_LOCK:
         config: Config = application.bot_data["config"]
         db: Database = application.bot_data["db"]
-        await publish_due_items(application, config, db)
+        result = await publish_due_items(application, config, db)
+        LOGGER.info("[SCHED][DONE] source=apscheduler result=%r", result)
+
+
+async def run_scheduler_once(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.bot_data["config"]
+    db: Database = context.bot_data["db"]
+    if update.effective_chat.id != config.intake_chat_id:
+        return
+    if not update.effective_user or not await is_admin(context, update.effective_user.id):
+        return
+    LOGGER.info("[SCHED][START] source=manual")
+    result = await publish_due_items(context.application, config, db)
+    LOGGER.info("[SCHED][DONE] source=manual result=%r", result)
+    await update.message.reply_text("Scheduler ran once. Check logs for details.")
 
 async def on_shutdown(app: Application) -> None:
     scheduler: AsyncIOScheduler = app.bot_data.get("scheduler")
@@ -849,6 +889,7 @@ def main() -> None:
     application.add_handler(CommandHandler("help", on_help))
     application.add_handler(CommandHandler("status", on_status))
     application.add_handler(CommandHandler("queue", on_queue))
+    application.add_handler(CommandHandler("run_scheduler_once", run_scheduler_once))  
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_state_text))
     application.add_handler(
